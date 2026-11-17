@@ -1,0 +1,137 @@
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Installer Ruff
+        run: pip install ruff
+
+      - name: Vérifier le code
+        run: ruff check . --output-format=github
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Installer les dépendances
+        run: pip install -r requirements-dev.txt
+
+      - name: Créer le dossier des rapports
+        run: mkdir -p reports
+
+      - name: Lancer les tests avec couverture
+        run: |
+          pytest -m "unit or api" -n auto \
+            --cov \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-fail-under=80 \
+            --junitxml=reports/junit.xml
+
+      - name: Publier les rapports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rapports-python-${{ matrix.python-version }}
+          path: |
+            reports/
+            htmlcov/
+            coverage.xml
+          if-no-files-found: warn
+
+      - name: Ajouter la couverture au résumé
+        if: always()
+        run: |
+          if [ -f coverage.xml ]; then
+            coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Aucun rapport de couverture disponible." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  container-tests:
+    needs: lint
+    runs-on: ubuntu-latest
+
+    container:
+      image: python:3.12-slim
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer les dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Vérifier Python dans le conteneur
+        run: python --version
+
+      - name: Exécuter les tests dans le conteneur
+        run: pytest -m "unit or api" -n auto
+
+  docker:
+    needs: lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Construire l'image Docker
+        run: docker build -t minishop:latest .
+
+      - name: Démarrer le conteneur
+        run: |
+          docker run -d \
+            --name minishop \
+            -p 8000:8000 \
+            minishop:latest
+
+      - name: Smoke test - vérifier /health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health; then
+              echo "Smoke test réussi !"
+              exit 0
+            fi
+            echo "En attente de l'application..."
+            sleep 2
+          done
+
+          echo "Échec du smoke test"
+          docker logs minishop
+          exit 1
+
+      - name: Arrêter le conteneur
+        if: always()
+        run: docker rm -f minishop || true
